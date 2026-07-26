@@ -1,16 +1,19 @@
 package kv
 
+import "../wal"
 import "core:bytes"
 import "core:strings"
 
 KVStore :: struct {
 	data: map[string][]u8,
+	wal:  ^wal.Log,
 }
 
 KV_Error :: enum {
 	None,
 	Not_Found,
 	Invalid_Format,
+	IO_Error,
 }
 
 make_kv_store :: proc() -> KVStore {
@@ -21,6 +24,11 @@ destroy_kv_store :: proc(this: ^KVStore) {
 	for k, v in this.data {
 		delete(k)
 		delete(v)
+	}
+
+	if this.wal != nil {
+		wal.close(this.wal)
+		this.wal = nil
 	}
 
 	delete(this.data)
@@ -53,11 +61,25 @@ put :: proc(this: ^KVStore, key: []u8, value: []u8) -> (updated: bool, error: KV
 	key_view := string(key)
 	prev, exists := this.data[key_view]
 
-	if exists {
-		if bytes.equal(prev, value) {
-			return false, .None
+	if exists && bytes.equal(prev, value) {
+		return false, .None
+	}
+
+	if this.wal != nil {
+		entry := make_kv_entry(.Edit, key, value)
+		payload, serialize_err := serialize(&entry)
+		if serialize_err != .None {
+			return false, serialize_err
 		}
 
+		defer delete(payload)
+
+		if werr := wal.write(this.wal, payload); werr != nil {
+			return false, .IO_Error
+		}
+	}
+
+	if exists {
 		delete(prev)
 		this.data[key_view] = bytes.clone(value)
 		return true, .None
@@ -73,6 +95,20 @@ del :: proc(this: ^KVStore, key: []u8) -> (updated: bool, error: KV_Error) {
 	key_view := string(key)
 	if key_view not_in this.data {
 		return false, .Not_Found
+	}
+
+	if this.wal != nil {
+		entry := make_kv_entry(.Delete, key)
+		payload, serialize_err := serialize(&entry)
+		if serialize_err != .None {
+			return false, serialize_err
+		}
+
+		defer delete(payload)
+
+		if werr := wal.write(this.wal, payload); werr != nil {
+			return false, .IO_Error
+		}
 	}
 
 	old_key, old_val := delete_key(&this.data, key_view)
