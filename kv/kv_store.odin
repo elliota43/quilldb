@@ -10,6 +10,7 @@ KVStore :: struct {
 KV_Error :: enum {
 	None,
 	Not_Found,
+	Invalid_Format,
 }
 
 make_kv_store :: proc() -> KVStore {

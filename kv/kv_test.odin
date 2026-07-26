@@ -4,157 +4,148 @@ import "core:bytes"
 import "core:testing"
 
 @(test)
-test_put_get_roundtrip :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
+test_serialize_edit_layout :: proc(t: ^testing.T) {
+	key := transmute([]u8)string("hi")
+	val := transmute([]u8)string("yo")
+	entry := make_kv_entry(.Edit, key, val)
 
+	data, err := serialize(&entry)
+	defer delete(data)
+
+	testing.expect_value(t, err, KV_Error.None)
+	testing.expect_value(t, len(data), 13)
+	testing.expect_value(t, data[0], u8(KV_Entry_Type.Edit))
+	testing.expect(t, bytes.equal(data[1:5], []u8{2, 0, 0, 0}))
+	testing.expect(t, bytes.equal(data[5:9], []u8{2, 0, 0, 0}))
+	testing.expect(t, bytes.equal(data[9:11], key))
+	testing.expect(t, bytes.equal(data[11:13], val))
+}
+
+@(test)
+test_serialize_delete_layout :: proc(t: ^testing.T) {
+	key := transmute([]u8)string("k")
+	entry := make_kv_entry(.Delete, key, transmute([]u8)string("ignored"))
+
+	data, err := serialize(&entry)
+	defer delete(data)
+	testing.expect_value(t, err, KV_Error.None)
+	testing.expect_value(t, len(data), 10)
+	testing.expect_value(t, data[0], u8(KV_Entry_Type.Delete))
+	testing.expect(t, bytes.equal(data[1:5], []u8{1, 0, 0, 0}))
+	testing.expect(t, bytes.equal(data[5:9], []u8{0, 0, 0, 0}))
+	testing.expect(t, bytes.equal(data[9:10], key))
+}
+
+
+@(test)
+test_serialize_empty_value :: proc(t: ^testing.T) {
+	entry := make_kv_entry(.Edit, transmute([]u8)string("k"), []u8{})
+	data, err := serialize(&entry)
+	defer delete(data)
+	testing.expect_value(t, err, KV_Error.None)
+	testing.expect_value(t, len(data), 10)
+	testing.expect(t, bytes.equal(data[5:9], []u8{0, 0, 0, 0}))
+}
+@(test)
+test_serialize_binary_payload :: proc(t: ^testing.T) {
+	key := []u8{0x00, 0xff, 0x01}
+	val := []u8{0xde, 0xad}
+	entry := make_kv_entry(.Edit, key, val)
+	data, err := serialize(&entry)
+	defer delete(data)
+	testing.expect_value(t, err, KV_Error.None)
+	testing.expect(t, bytes.equal(data[9:12], key))
+	testing.expect(t, bytes.equal(data[12:14], val))
+}
+
+@(test)
+test_serialize_borrows_input :: proc(t: ^testing.T) {
+	key := []u8{'k'}
+	val := []u8{'v', '1'}
+	entry := make_kv_entry(.Edit, key, val)
+
+	data, err := serialize(&entry)
+	defer delete(data)
+	testing.expect_value(t, err, KV_Error.None)
+
+	key[0] = 'x'
+	val[1] = '2'
+
+
+	// Mutating calling buffer must not change already-serialized output
+	testing.expect(t, bytes.equal(data[9:10], []u8{'k'}))
+	testing.expect(t, bytes.equal(data[10:12], []u8{'v', '1'}))
+}
+
+@(test)
+test_roundtrip_edit :: proc(t: ^testing.T) {
 	key := transmute([]u8)string("alpha")
 	val := transmute([]u8)string("one")
+	entry := make_kv_entry(.Edit, key, val)
 
-	updated, err := put(&store, key, val)
+	data, err := serialize(&entry)
+	defer delete(data)
 	testing.expect_value(t, err, KV_Error.None)
-	testing.expect(t, updated)
 
-	got, gerr := get(&store, key)
-	testing.expect_value(t, gerr, KV_Error.None)
-	testing.expect(t, bytes.equal(got, val))
+	got, derr := deserialize(data)
+	defer destroy_kv_entry(&got)
+	testing.expect_value(t, derr, KV_Error.None)
+	testing.expect_value(t, got.type, KV_Entry_Type.Edit)
+	testing.expect(t, bytes.equal(got.key, key))
+	testing.expect(t, bytes.equal(got.value, val))
 }
 
 @(test)
-test_get_missing :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-
-	_, err := get(&store, transmute([]u8)string("nope"))
-	testing.expect_value(t, err, KV_Error.Not_Found)
-}
-
-@(test)
-test_put_overwrite :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-
-	key := transmute([]u8)string("k")
-	_, _ = put(&store, key, transmute([]u8)string("v1"))
-
-	updated, err := put(&store, key, transmute([]u8)string("v2"))
+test_roundtrip_delete :: proc(t: ^testing.T) {
+	key := transmute([]u8)string("gone")
+	entry := make_kv_entry(.Delete, key)
+	data, err := serialize(&entry)
+	defer delete(data)
 	testing.expect_value(t, err, KV_Error.None)
-	testing.expect(t, updated)
-
-	got, gerr := get(&store, key)
-	testing.expect_value(t, gerr, KV_Error.None)
-	testing.expect(t, bytes.equal(got, transmute([]u8)string("v2")))
+	got, derr := deserialize(data)
+	defer destroy_kv_entry(&got)
+	testing.expect_value(t, derr, KV_Error.None)
+	testing.expect_value(t, got.type, KV_Entry_Type.Delete)
+	testing.expect(t, bytes.equal(got.key, key))
+	testing.expect_value(t, len(got.value), 0)
 }
 
+@(test)
+test_deserialize_owns_memory :: proc(t: ^testing.T) {
+	entry := make_kv_entry(.Edit, transmute([]u8)string("k"), transmute([]u8)string("v1"))
+	data, err := serialize(&entry)
+	testing.expect_value(t, err, KV_Error.None)
+	got, derr := deserialize(data)
+	defer destroy_kv_entry(&got)
+	testing.expect_value(t, derr, KV_Error.None)
+	delete(data) // wire buffer gone; got must still be valid
+	testing.expect(t, bytes.equal(got.key, transmute([]u8)string("k")))
+	testing.expect(t, bytes.equal(got.value, transmute([]u8)string("v1")))
+}
 
 @(test)
-test_put_same_value_no_update :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	key := transmute([]u8)string("k")
-	val := transmute([]u8)string("same")
-	_, _ = put(&store, key, val)
-	updated, err := put(&store, key, val)
-	testing.expect_value(t, err, KV_Error.None)
-	testing.expect(t, !updated)
+test_deserialize_too_short :: proc(t: ^testing.T) {
+	_, err := deserialize([]u8{1, 2, 3})
+	testing.expect_value(t, err, KV_Error.Invalid_Format)
 }
+
 @(test)
-test_delete_existing :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	key := transmute([]u8)string("k")
-	_, _ = put(&store, key, transmute([]u8)string("v"))
-	updated, err := del(&store, key)
-	testing.expect_value(t, err, KV_Error.None)
-	testing.expect(t, updated)
-	_, gerr := get(&store, key)
-	testing.expect_value(t, gerr, KV_Error.Not_Found)
+test_deserialize_truncated_payload :: proc(t: ^testing.T) {
+	data := []u8{u8(KV_Entry_Type.Edit), 5, 0, 0, 0, 0, 0, 0, 0, 'a', 'b'}
+	_, err := deserialize(data)
+	testing.expect_value(t, err, KV_Error.Invalid_Format)
 }
+
 @(test)
-test_delete_missing :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	updated, err := del(&store, transmute([]u8)string("missing"))
-	testing.expect_value(t, err, KV_Error.Not_Found)
-	testing.expect(t, !updated)
+test_deserialize_bad_type :: proc(t: ^testing.T) {
+	data := []u8{0xff, 0, 0, 0, 0, 0, 0, 0, 0}
+	_, err := deserialize(data)
+	testing.expect_value(t, err, KV_Error.Invalid_Format)
 }
+
 @(test)
-test_binary_keys :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	key := []u8{0x00, 0xff, 0x01}
-	val := []u8{1, 2, 3}
-	_, err := put(&store, key, val)
-	testing.expect_value(t, err, KV_Error.None)
-	got, gerr := get(&store, key)
-	testing.expect_value(t, gerr, KV_Error.None)
-	testing.expect(t, bytes.equal(got, val))
-}
-@(test)
-test_keys_are_distinct :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	_, _ = put(&store, transmute([]u8)string("a"), transmute([]u8)string("1"))
-	_, _ = put(&store, transmute([]u8)string("ab"), transmute([]u8)string("2"))
-	a, _ := get(&store, transmute([]u8)string("a"))
-	ab, _ := get(&store, transmute([]u8)string("ab"))
-	testing.expect(t, bytes.equal(a, transmute([]u8)string("1")))
-	testing.expect(t, bytes.equal(ab, transmute([]u8)string("2")))
-}
-@(test)
-test_put_owns_value_memory :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	key_buf := []u8{'k'}
-	val_buf := []u8{'v', '1'}
-	_, err := put(&store, key_buf, val_buf)
-	testing.expect_value(t, err, KV_Error.None)
-	// Mutate caller's buffers after put — store must be unaffected.
-	val_buf[1] = '2'
-	key_buf[0] = 'x'
-	got, gerr := get(&store, transmute([]u8)string("k"))
-	testing.expect_value(t, gerr, KV_Error.None)
-	testing.expect(
-		t,
-		bytes.equal(got, transmute([]u8)string("v1")),
-		"store must own its own copy of the value",
-	)
-}
-@(test)
-test_overwrite_then_get :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	key := transmute([]u8)string("k")
-	_, _ = put(&store, key, transmute([]u8)string("first"))
-	_, _ = put(&store, key, transmute([]u8)string("second"))
-	_, _ = put(&store, key, transmute([]u8)string("third"))
-	got, err := get(&store, key)
-	testing.expect_value(t, err, KV_Error.None)
-	testing.expect(t, bytes.equal(got, transmute([]u8)string("third")))
-}
-@(test)
-test_delete_then_reinsert :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	key := transmute([]u8)string("k")
-	_, _ = put(&store, key, transmute([]u8)string("v1"))
-	_, _ = del(&store, key)
-	updated, err := put(&store, key, transmute([]u8)string("v2"))
-	testing.expect_value(t, err, KV_Error.None)
-	testing.expect(t, updated)
-	got, gerr := get(&store, key)
-	testing.expect_value(t, gerr, KV_Error.None)
-	testing.expect(t, bytes.equal(got, transmute([]u8)string("v2")))
-}
-@(test)
-test_empty_value_allowed :: proc(t: ^testing.T) {
-	store := make_kv_store()
-	defer destroy_kv_store(&store)
-	key := transmute([]u8)string("k")
-	empty := []u8{}
-	_, err := put(&store, key, empty)
-	testing.expect_value(t, err, KV_Error.None)
-	got, gerr := get(&store, key)
-	testing.expect_value(t, gerr, KV_Error.None)
-	testing.expect(t, len(got) == 0)
+test_deserialize_delete_with_value_rejected :: proc(t: ^testing.T) {
+	data := []u8{u8(KV_Entry_Type.Delete), 1, 0, 0, 0, 1, 0, 0, 0, 'k', 'v'}
+	_, err := deserialize(data)
+	testing.expect_value(t, err, KV_Error.Invalid_Format)
 }
