@@ -49,40 +49,55 @@ serialize :: proc(kv: ^KV_Entry, allocator := context.allocator) -> (data: []u8,
 	return buf, .None
 }
 
-deserialize :: proc(
+deserialize :: proc(data: []u8, allocator := context.allocator) -> (KV_Entry, KV_Error) {
+	entry, size, err := try_decode_entry(data, allocator)
+	if err != .None {
+		return {}, err
+	}
+
+	if size != len(data) {
+		destroy_kv_entry(&entry)
+		return {}, .Invalid_Format
+	}
+
+	return entry, .None
+}
+
+// try_decode_entry tries to decode the next KV_Entry from the raw byte data.
+try_decode_entry :: proc(
 	data: []u8,
 	allocator := context.allocator,
 ) -> (
 	entry: KV_Entry,
+	size: int,
 	err: KV_Error,
 ) {
 	if len(data) < 9 {
-		return {}, .Invalid_Format
+		return {}, 0, .Incomplete_Record
 	}
 
 	type := KV_Entry_Type(data[0])
 	if type != .Edit && type != .Delete {
-		return {}, .Invalid_Format
+		return {}, 0, .Invalid_Format
 	}
 
 	key_len, ok_k := endian.get_u32(data[1:5], .Little)
 	value_len, ok_v := endian.get_u32(data[5:9], .Little)
 	if !ok_k || !ok_v {
-		return {}, .Invalid_Format
+		return {}, 0, .Invalid_Format
 	}
 
 	need := 9 + int(key_len) + int(value_len)
-
-	if len(data) != need {
-		return {}, .Invalid_Format
+	if len(data) < need {
+		return {}, 0, .Incomplete_Record
 	}
 
 	if type == .Delete && value_len != 0 {
-		return {}, .Invalid_Format
+		return {}, 0, .Invalid_Format
 	}
 
 	entry.type = type
-	entry.key = bytes.clone(data[9:9 + key_len], allocator)
-	entry.value = bytes.clone(data[9 + key_len:need], allocator)
-	return entry, .None
+	entry.key = bytes.clone(data[9:][:key_len], allocator)
+	entry.value = bytes.clone(data[9 + key_len:][:value_len], allocator)
+	return entry, need, .None
 }
